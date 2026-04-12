@@ -21,6 +21,7 @@ h1 { font-size: 22px; font-weight: 500; margin-bottom: 1.5rem; color: #fff; }
 .tab.active { background: #2a2a2a; color: #eee; border-color: #555; }
 .search-row { display: flex; gap: 8px; margin-bottom: 1rem; }
 .search-row input { flex: 1; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 10px 14px; font-size: 15px; color: #eee; outline: none; }
+.search-row input:focus { border-color: #555; }
 .btn { padding: 10px 20px; border-radius: 8px; border: 1px solid #444; background: #2a2a2a; color: #eee; font-size: 14px; font-weight: 500; cursor: pointer; white-space: nowrap; }
 .btn:hover { background: #333; }
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -42,13 +43,13 @@ h1 { font-size: 22px; font-weight: 500; margin-bottom: 1.5rem; color: #fff; }
 .match-title { font-size: 14px; font-weight: 500; color: #eee; }
 .match-meta { font-size: 12px; color: #666; margin-top: 2px; }
 .err { font-size: 13px; color: #e05555; margin-top: 8px; }
-.note { font-size: 12px; color: #666; margin-top: 8px; }
 .spinner { width: 12px; height: 12px; border: 2px solid #444; border-top-color: #888; border-radius: 50%; animation: spin 0.6s linear infinite; display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .panel { display: none; }
 .panel.active { display: block; }
 .saved { font-size: 12px; color: #5cb85c; margin-top: 6px; display: none; }
 .progress { font-size: 13px; color: #888; margin-bottom: 10px; }
+.hint { font-size: 12px; color: #555; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -56,9 +57,20 @@ h1 { font-size: 22px; font-weight: 500; margin-bottom: 1.5rem; color: #fff; }
   <h1>Plex Movie Checker</h1>
   <div class="card">
     <div class="card-title">Config</div>
-    <div class="field"><label>Server URL</label><input id="plexUrl" value="https://100.109.236.53" /></div>
-    <div class="field"><label>Plex token</label><input id="plexToken" type="password" value="eixp7UGkmj8hcMhpdpU6" /></div>
-    <div class="field"><label>Anthropic API key (for photo ID)</label><input id="anthropicKey" type="password" placeholder="sk-ant-api03-..." /></div>
+    <div class="field">
+      <label>Server URL</label>
+      <input id="plexUrl" value="https://192-168-50-203.79edeb32057a4ea5808c4d1b0dee3269.plex.direct:32400" />
+      <div class="hint">Requires Tailscale to be on</div>
+    </div>
+    <div class="field">
+      <label>Plex token</label>
+      <input id="plexToken" type="password" value="eixp7UGkmj8hcMhpdpU6" />
+    </div>
+    <div class="field">
+      <label>Anthropic API key <span style="color:#555;">(only needed for photo tab)</span></label>
+      <input id="anthropicKey" type="password" placeholder="sk-ant-api03-..." />
+      <div class="hint">Get from console.anthropic.com</div>
+    </div>
     <button class="btn btn-full" onclick="saveConfig()">Save config</button>
     <div class="saved" id="savedMsg">Saved!</div>
   </div>
@@ -85,9 +97,9 @@ h1 { font-size: 22px; font-weight: 500; margin-bottom: 1.5rem; color: #fff; }
   <div class="panel" id="panel-bulk">
     <div class="field">
       <label>Paste movie titles (one per line, bullets ok)</label>
-      <textarea id="bulkInput" placeholder="Captain America: The First Avenger&#10;* Captain America: Civil War&#10;- The Dark Knight&#10;Inception (2010)"></textarea>
+      <textarea id="bulkInput" placeholder="Tron&#10;Tron: Legacy&#10;* The Dark Knight&#10;- Inception (2010)"></textarea>
     </div>
-    <button class="btn btn-full" onclick="doBulk()">Check all ↗</button>
+    <button class="btn btn-full" onclick="doBulk()">Check all</button>
     <div class="result" id="resultBulk">
       <div class="progress" id="bulkProgress"></div>
       <div id="bulkList"></div>
@@ -101,7 +113,7 @@ h1 { font-size: 22px; font-weight: 500; margin-bottom: 1.5rem; color: #fff; }
       <div style="font-size:24px;margin-bottom:6px;">📷</div>
       <div style="font-size:14px;color:#888;">Upload a photo of a movie<br><span style="font-size:12px;color:#555;">poster, DVD case, title on screen</span></div>
     </div>
-    <button class="btn btn-full" id="photoBtn" onclick="doPhoto()" disabled>Identify & Check</button>
+    <button class="btn btn-full" id="photoBtn" onclick="doPhoto()" disabled>Identify &amp; Check</button>
     <div class="result" id="resultPhoto">
       <div class="r-title" id="rPhotoTitle"></div>
       <span class="badge b-wait" id="photoBadge"><span class="spinner"></span> Checking...</span>
@@ -143,7 +155,7 @@ function saveConfig() {
 }
 
 function parseTitle(line) {
-  return line.replace(/^[\*\-\•\+]\s*/, '').replace(/\s*\(\d{4}\)\s*$/, '').trim();
+  return line.replace(/^[\*\-\u2022\+]\s*/, '').replace(/\s*\(\d{4}\)\s*$/, '').trim();
 }
 
 function handleFile(input) {
@@ -171,34 +183,39 @@ async function checkPlex(title) {
   return items.filter(item => (item.getAttribute('title') || '').toLowerCase().includes(q));
 }
 
+function renderMatches(matches, badgeEl, matchesEl) {
+  if (matches.length === 0) {
+    badgeEl.className = 'badge b-no';
+    badgeEl.textContent = 'Not in Plex';
+  } else {
+    badgeEl.className = 'badge b-yes';
+    badgeEl.textContent = matches.length === 1 ? 'Found in Plex!' : matches.length + ' matches';
+    matchesEl.innerHTML = matches.map(item => {
+      const t = item.getAttribute('title') || '';
+      const y = item.getAttribute('year') || '';
+      const lib = item.getAttribute('librarySectionTitle') || '';
+      return '<div class="match-item"><div class="match-title">' + t + '</div><div class="match-meta">' + [y, lib].filter(Boolean).join(' · ') + '</div></div>';
+    }).join('');
+  }
+}
+
 async function doSearch() {
   const title = document.getElementById('searchInput').value.trim();
   if (!title) return;
   const rc = document.getElementById('resultSingle');
   rc.style.display = 'block';
   document.getElementById('rTitle').textContent = title;
-  document.getElementById('badge').className = 'badge b-wait';
-  document.getElementById('badge').innerHTML = '<span class="spinner"></span> Checking...';
+  const badge = document.getElementById('badge');
+  badge.className = 'badge b-wait';
+  badge.innerHTML = '<span class="spinner"></span> Checking...';
   document.getElementById('matches').innerHTML = '';
   document.getElementById('rErr').textContent = '';
   try {
     const matches = await checkPlex(title);
-    if (matches.length === 0) {
-      document.getElementById('badge').className = 'badge b-no';
-      document.getElementById('badge').textContent = 'Not in Plex';
-    } else {
-      document.getElementById('badge').className = 'badge b-yes';
-      document.getElementById('badge').textContent = matches.length === 1 ? 'Found in Plex!' : matches.length + ' matches';
-      document.getElementById('matches').innerHTML = matches.map(item => {
-        const t = item.getAttribute('title') || '';
-        const y = item.getAttribute('year') || '';
-        const lib = item.getAttribute('librarySectionTitle') || '';
-        return '<div class="match-item"><div class="match-title">' + t + '</div><div class="match-meta">' + [y,lib].filter(Boolean).join(' · ') + '</div></div>';
-      }).join('');
-    }
+    renderMatches(matches, badge, document.getElementById('matches'));
   } catch(e) {
-    document.getElementById('badge').className = 'badge b-no';
-    document.getElementById('badge').textContent = 'Error';
+    badge.className = 'badge b-no';
+    badge.textContent = 'Error';
     document.getElementById('rErr').textContent = e.message + ' — make sure Tailscale is on.';
   }
 }
@@ -206,29 +223,22 @@ async function doSearch() {
 async function doBulk() {
   const raw = document.getElementById('bulkInput').value.trim();
   if (!raw) return;
-  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
-  const titles = lines.map(parseTitle).filter(Boolean);
+  const titles = raw.split('\n').map(l => parseTitle(l.trim())).filter(Boolean);
   const rc = document.getElementById('resultBulk');
   const list = document.getElementById('bulkList');
   const progress = document.getElementById('bulkProgress');
   rc.style.display = 'block';
-  list.innerHTML = titles.map((t,i) => 
-    '<div class="bulk-item" id="bi'+i+'"><div class="bulk-title">'+t+'</div><span class="badge b-wait"><span class="spinner"></span></span></div>'
+  list.innerHTML = titles.map((t, i) =>
+    '<div class="bulk-item" id="bi' + i + '"><div class="bulk-title">' + t + '</div><span class="badge b-wait"><span class="spinner"></span></span></div>'
   ).join('');
-
   for (let i = 0; i < titles.length; i++) {
-    progress.textContent = 'Checking ' + (i+1) + ' of ' + titles.length + '...';
-    const row = document.getElementById('bi'+i);
+    progress.textContent = 'Checking ' + (i + 1) + ' of ' + titles.length + '...';
+    const row = document.getElementById('bi' + i);
     const badge = row.querySelector('.badge');
     try {
       const matches = await checkPlex(titles[i]);
-      if (matches.length === 0) {
-        badge.className = 'badge b-no';
-        badge.textContent = 'Not found';
-      } else {
-        badge.className = 'badge b-yes';
-        badge.textContent = 'In Plex';
-      }
+      badge.className = matches.length > 0 ? 'badge b-yes' : 'badge b-no';
+      badge.textContent = matches.length > 0 ? 'In Plex' : 'Not found';
     } catch(e) {
       badge.className = 'badge b-no';
       badge.textContent = 'Error';
@@ -242,20 +252,25 @@ async function doPhoto() {
   if (!imageBase64) return;
   const btn = document.getElementById('photoBtn');
   const rc = document.getElementById('resultPhoto');
+  const photoBadge = document.getElementById('photoBadge');
+  const photoMatches = document.getElementById('photoMatches');
+  const rPhotoErr = document.getElementById('rPhotoErr');
   btn.disabled = true;
   btn.textContent = 'Identifying...';
   rc.style.display = 'block';
   document.getElementById('rPhotoTitle').textContent = 'Identifying...';
-  document.getElementById('photoBadge').className = 'badge b-wait';
-  document.getElementById('photoBadge').innerHTML = '<span class="spinner"></span> Checking...';
-  document.getElementById('photoMatches').innerHTML = '';
-  document.getElementById('rPhotoErr').textContent = '';
+  photoBadge.className = 'badge b-wait';
+  photoBadge.innerHTML = '<span class="spinner"></span> Identifying...';
+  photoMatches.innerHTML = '';
+  rPhotoErr.textContent = '';
 
   const apiKey = document.getElementById('anthropicKey').value.trim();
   if (!apiKey) {
-    document.getElementById('rPhotoErr').textContent = 'Please add your Anthropic API key in config above.';
+    rPhotoErr.textContent = 'Please add your Anthropic API key in the config above to use photo search.';
     btn.disabled = false;
     btn.textContent = 'Identify & Check';
+    photoBadge.className = 'badge b-no';
+    photoBadge.textContent = 'No API key';
     return;
   }
 
@@ -278,31 +293,21 @@ async function doPhoto() {
       })
     });
     const data = await res.json();
-    const raw = (data && data.content ? data.content : []).map(b => b.text || '').join('').replace(/```json|```/g, '').trim();
-    if (!raw) throw new Error('Empty API response - check your API key');
+    if (data.error) throw new Error(data.error.message);
+    const raw = (data.content || []).map(b => b.text || '').join('').replace(/```json|```/g, '').trim();
+    if (!raw) throw new Error('Empty response — check your API key');
     const movie = JSON.parse(raw);
     document.getElementById('rPhotoTitle').textContent = movie.title + (movie.year ? ' (' + movie.year + ')' : '');
     btn.disabled = false;
     btn.textContent = 'Identify & Check';
+    photoBadge.innerHTML = '<span class="spinner"></span> Checking Plex...';
     const matches = await checkPlex(movie.title);
-    if (matches.length === 0) {
-      document.getElementById('photoBadge').className = 'badge b-no';
-      document.getElementById('photoBadge').textContent = 'Not in Plex';
-    } else {
-      document.getElementById('photoBadge').className = 'badge b-yes';
-      document.getElementById('photoBadge').textContent = matches.length === 1 ? 'Found in Plex!' : matches.length + ' matches';
-      document.getElementById('photoMatches').innerHTML = matches.map(item => {
-        const t = item.getAttribute('title') || '';
-        const y = item.getAttribute('year') || '';
-        const lib = item.getAttribute('librarySectionTitle') || '';
-        return '<div class="match-item"><div class="match-title">'+t+'</div><div class="match-meta">'+[y,lib].filter(Boolean).join(' · ')+'</div></div>';
-      }).join('');
-    }
+    renderMatches(matches, photoBadge, photoMatches);
   } catch(e) {
-    document.getElementById('rPhotoTitle').textContent = 'Could not identify';
-    document.getElementById('photoBadge').className = 'badge b-no';
-    document.getElementById('photoBadge').textContent = 'Error';
-    document.getElementById('rPhotoErr').textContent = e.message;
+    document.getElementById('rPhotoTitle').textContent = 'Error';
+    photoBadge.className = 'badge b-no';
+    photoBadge.textContent = 'Failed';
+    rPhotoErr.textContent = e.message;
     btn.disabled = false;
     btn.textContent = 'Identify & Check';
   }
@@ -312,4 +317,3 @@ loadConfig();
 </script>
 </body>
 </html>
-
