@@ -115,9 +115,7 @@ select option { background:#1c1c24; }
 .toast.show { transform:translateX(-50%) translateY(0); }
 .divider { height:1px; background:var(--border); margin:14px 0; }
 .key-hint { font-size:11px; color:var(--muted); margin-top:5px; }
-.info-box { border-radius:9px; padding:11px 13px; font-size:12px; margin-bottom:14px; line-height:1.6; }
-.info-box.yellow { background:rgba(229,160,13,0.08); border:1px solid rgba(229,160,13,0.2); color:var(--accent); }
-.info-box.green  { background:var(--green-bg); border:1px solid var(--green-border); color:var(--green); }
+.info-box { border-radius:9px; padding:11px 13px; font-size:12px; margin-bottom:14px; line-height:1.6; background:rgba(229,160,13,0.08); border:1px solid rgba(229,160,13,0.2); color:var(--accent); }
 .spinner { width:15px; height:15px; border:2px solid rgba(0,0,0,.25); border-top-color:#000; border-radius:50%; display:inline-block; animation:spin .65s linear infinite; }
 .spinner-light { border-color:rgba(229,160,13,.2); border-top-color:var(--accent); }
 @keyframes spin { to{transform:rotate(360deg)} }
@@ -131,7 +129,7 @@ select option { background:#1c1c24; }
 <div class="header">
   <div>
     <div class="logo">PLEX</div>
-    <div class="logo-sub">Library Checker</div>
+    <div class="logo-sub">Library Checker · Tailscale</div>
   </div>
   <div class="header-actions">
     <button class="hbtn" onclick="openConfig()">⚙️ Config</button>
@@ -311,18 +309,8 @@ select option { background:#1c1c24; }
       <div class="modal-title">⚙️ Plex Config</div>
       <button class="close-btn" onclick="closeConfig()">✕</button>
     </div>
-    <div class="info-box yellow">
-      💡 The app auto-detects if you're home or away and switches servers automatically. Just save both URLs below.
-    </div>
-    <div class="field">
-      <label>Local Server URL (home WiFi)</label>
-      <input type="text" id="cfg-server-local" placeholder="https://192-168-50-203….plex.direct:32400">
-      <div class="key-hint">Used when on your home network</div>
-    </div>
-    <div class="field">
-      <label>Plex Remote URL (outside home)</label>
-      <input type="text" id="cfg-server-remote" placeholder="https://app.plex.tv/desktop (or your relay URL)">
-      <div class="key-hint">Get from Plex → Settings → Remote Access → "Show Advanced"</div>
+    <div class="info-box">
+      🔒 Requires <b>Tailscale ON</b> on this device. All requests go through your Tailscale network.
     </div>
     <div class="field">
       <label>Plex Token</label>
@@ -339,20 +327,12 @@ select option { background:#1c1c24; }
 <div class="toast" id="toast"></div>
 
 <script>
-// ── CONFIG ──────────────────────────────────────────────────
-let cfg = {
-  serverLocal:  'https://192-168-50-203.79edeb32057a4ea5808c4d1b0dee3269.plex.direct:32400',
-  serverRemote: 'https://192-168-50-203.79edeb32057a4ea5808c4d1b0dee3269.plex.direct:32400',
-  token: 'eixp7UGkmj8hcMhpdpU6'
-};
-
-// The CORS proxy wraps HTTP Tailscale calls so GitHub Pages (HTTPS) can reach them
-// allOrigins is a free, open CORS proxy — it just forwards the request server-side
+// ── HARDCODED TAILSCALE CONFIG ───────────────────────────────
+// All requests go: GitHub Pages → allorigins CORS proxy → Tailscale IP → Plex
 const CORS_PROXY = 'https://api.allorigins.win/raw?url=';
-const TS_SERVER  = 'http://100.109.236.53:32400'; // Tailscale IP — used via proxy
+const PLEX_SERVER = 'http://100.109.236.53:32400';
 
-let activeServer = null; // resolved at runtime
-let usingProxy   = false;
+let cfg = { token: 'eixp7UGkmj8hcMhpdpU6' };
 
 let currentProv = 'claude';
 let imgB64 = null, imgMime = null;
@@ -360,71 +340,31 @@ let photoFound = [], photoMissing = [];
 let bulkFound = [], bulkMissing = [], bulkAll = [];
 let bulkRunning = false, bulkStop = false;
 
-// ── INIT ────────────────────────────────────────────────────
+// ── INIT ─────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
   loadCfg(); loadKeys(); initDrop();
-  if (!cfg.token) setTimeout(openConfig, 400);
 });
 
-// ── SERVER DETECTION ────────────────────────────────────────
-// Try local plex.direct first (works on LAN), then fall back to
-// CORS proxy → Tailscale IP (works outside)
-async function resolveServer() {
-  // Try local/direct URL first (fast on LAN, times out outside)
-  try {
-    const r = await fetch(`${cfg.serverLocal}/identity?X-Plex-Token=${cfg.token}`, {
-      signal: AbortSignal.timeout(3000)
-    });
-    if (r.ok) {
-      activeServer = cfg.serverLocal;
-      usingProxy = false;
-      return true;
-    }
-  } catch(e) {}
-
-  // Fall back: CORS proxy → Tailscale IP
-  try {
-    const proxyUrl = CORS_PROXY + encodeURIComponent(`${TS_SERVER}/identity?X-Plex-Token=${cfg.token}`);
-    const r = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
-    if (r.ok) {
-      activeServer = TS_SERVER;
-      usingProxy = true;
-      return true;
-    }
-  } catch(e) {}
-
-  return false;
-}
-
+// ── PLEX FETCH via CORS proxy ────────────────────────────────
 async function plexFetch(path) {
-  if (!activeServer) {
-    const ok = await resolveServer();
-    if (!ok) throw new Error('Cannot reach Plex server — check connection');
-  }
-  const url = `${activeServer}${path}${path.includes('?')?'&':'?'}X-Plex-Token=${cfg.token}`;
-  if (usingProxy) {
-    return fetch(CORS_PROXY + encodeURIComponent(url), { signal: AbortSignal.timeout(10000) });
-  }
-  return fetch(url, { signal: AbortSignal.timeout(10000) });
+  const sep = path.includes('?') ? '&' : '?';
+  const target = `${PLEX_SERVER}${path}${sep}X-Plex-Token=${cfg.token}`;
+  const url = CORS_PROXY + encodeURIComponent(target);
+  return fetch(url, { signal: AbortSignal.timeout(12000) });
 }
 
 // ── CONFIG ───────────────────────────────────────────────────
 function loadCfg() {
-  try { const s = localStorage.getItem('pxCfg6'); if (s) cfg = {...cfg,...JSON.parse(s)}; } catch(e){}
+  try { const s = localStorage.getItem('pxCfg7'); if (s) cfg = {...cfg,...JSON.parse(s)}; } catch(e){}
 }
 function saveConfig() {
-  cfg.serverLocal  = document.getElementById('cfg-server-local').value.trim().replace(/\/+$/,'');
-  cfg.serverRemote = document.getElementById('cfg-server-remote').value.trim().replace(/\/+$/,'');
-  cfg.token        = document.getElementById('cfg-token').value.trim();
-  localStorage.setItem('pxCfg6', JSON.stringify(cfg));
-  activeServer = null; // force re-detect on next request
+  cfg.token = document.getElementById('cfg-token').value.trim();
+  localStorage.setItem('pxCfg7', JSON.stringify(cfg));
   closeConfig(); toast('✅ Config saved!');
 }
 function openConfig() {
-  document.getElementById('cfg-server-local').value  = cfg.serverLocal;
-  document.getElementById('cfg-server-remote').value = cfg.serverRemote;
-  document.getElementById('cfg-token').value         = cfg.token;
-  document.getElementById('test-out').textContent    = '';
+  document.getElementById('cfg-token').value = cfg.token;
+  document.getElementById('test-out').textContent = '';
   document.getElementById('cfg-overlay').classList.add('open');
 }
 function closeConfig() { document.getElementById('cfg-overlay').classList.remove('open'); }
@@ -433,17 +373,14 @@ async function testConn() {
   const btn = document.getElementById('test-btn');
   const out = document.getElementById('test-out');
   btn.innerHTML = '<span class="spinner spinner-light"></span> Testing…'; btn.disabled = true;
-  out.textContent = '⏳ Detecting best connection…'; out.style.color = 'var(--muted)';
-  activeServer = null;
-  const ok = await resolveServer();
-  if (ok) {
-    out.style.color = 'var(--green)';
-    out.textContent = usingProxy
-      ? '✅ Connected via Tailscale (outside network)'
-      : '✅ Connected via local network';
-  } else {
+  out.style.color = 'var(--muted)'; out.textContent = '⏳ Connecting via Tailscale…';
+  try {
+    const r = await plexFetch('/identity');
+    out.style.color = r.ok ? 'var(--green)' : 'var(--red)';
+    out.textContent = r.ok ? '✅ Connected via Tailscale!' : `❌ Failed (HTTP ${r.status}) — is Tailscale ON?`;
+  } catch(e) {
     out.style.color = 'var(--red)';
-    out.textContent = '❌ Could not reach Plex — check token & server is running';
+    out.textContent = '❌ Could not connect — make sure Tailscale is ON';
   }
   btn.textContent = '🔌 Test Connection'; btn.disabled = false;
 }
@@ -539,7 +476,6 @@ async function doPhotoScan() {
   if (!imgB64) return;
   const key = document.getElementById('key-'+currentProv).value.trim() || getKey(currentProv);
   if (!key) { toast('⚠️ Enter your '+currentProv+' API key'); return; }
-  if (!cfg.token) { openConfig(); return; }
   resetScanUI(); photoFound=[]; photoMissing=[];
   const btn=document.getElementById('scan-btn');
   const prog=document.getElementById('scan-progress');
@@ -560,23 +496,18 @@ async function doPhotoScan() {
   document.getElementById('ph-total-n').textContent=titles.length;
   document.getElementById('scan-summary').style.display='';
   setStep(3); bar.style.width='20%';
-  lbl.textContent='🔍 Detecting network…';
-  activeServer=null;
   const out=document.getElementById('scan-results'); out.innerHTML='';
   for (let i=0;i<titles.length;i++) {
     const q=titles[i];
     bar.style.width=(20+Math.round((i/titles.length)*75))+'%';
     lbl.textContent=`Checking Plex: "${q}" (${i+1}/${titles.length})`;
-    const placeholderId='ph-card-'+i;
+    const pid='ph-card-'+i;
     const tmp=document.createElement('div');
-    tmp.innerHTML=`<div class="result-card scanning" id="${placeholderId}">
-      <div class="result-icon">⏳</div>
-      <div class="result-body"><div class="result-title">${esc(q)}</div><div class="result-meta">Checking Plex…</div></div>
-      <span class="badge badge-yellow">Scanning</span></div>`;
+    tmp.innerHTML=`<div class="result-card scanning" id="${pid}"><div class="result-icon">⏳</div><div class="result-body"><div class="result-title">${esc(q)}</div><div class="result-meta">Checking Plex…</div></div><span class="badge badge-yellow">Scanning</span></div>`;
     out.appendChild(tmp.firstChild);
     const results=await plexSearch(q,'1,2');
     const match=bestMatch(q,results); const found=!!match;
-    const ph=document.getElementById(placeholderId);
+    const ph=document.getElementById(pid);
     if(ph) ph.outerHTML=renderCard(q,found,match,true);
     if(found) photoFound.push({query:q,match}); else photoMissing.push({query:q});
     document.getElementById('ph-found-n').textContent=photoFound.length;
@@ -624,31 +555,27 @@ async function callAI(key) {
   return callOpenAI(key);
 }
 async function callClaude(key) {
-  const r=await fetch('https://api.anthropic.com/v1/messages',{
-    method:'POST',
+  const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
     headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
     body:JSON.stringify({model:'claude-opus-4-5',max_tokens:1024,messages:[{role:'user',content:[
       {type:'image',source:{type:'base64',media_type:imgMime,data:imgB64}},{type:'text',text:AI_PROMPT}
-    ]}]})
-  });
+    ]}]})});
   const d=await r.json(); if(!r.ok) throw new Error(d.error?.message||`HTTP ${r.status}`);
   return d.content?.[0]?.text||'[]';
 }
 async function callGemini(key) {
-  const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`,{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({contents:[{parts:[{inline_data:{mime_type:imgMime,data:imgB64}},{text:AI_PROMPT}]}]})
-  });
+  const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`,{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({contents:[{parts:[{inline_data:{mime_type:imgMime,data:imgB64}},{text:AI_PROMPT}]}]})});
   const d=await r.json(); if(!r.ok) throw new Error(d.error?.message||`HTTP ${r.status}`);
   return d.candidates?.[0]?.content?.parts?.[0]?.text||'[]';
 }
 async function callOpenAI(key) {
-  const r=await fetch('https://api.openai.com/v1/chat/completions',{
-    method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+key},
+  const r=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',
+    headers:{'Content-Type':'application/json','Authorization':'Bearer '+key},
     body:JSON.stringify({model:'gpt-4o',max_tokens:1024,messages:[{role:'user',content:[
       {type:'image_url',image_url:{url:`data:${imgMime};base64,${imgB64}`}},{type:'text',text:AI_PROMPT}
-    ]}]})
-  });
+    ]}]})});
   const d=await r.json(); if(!r.ok) throw new Error(d.error?.message||`HTTP ${r.status}`);
   return d.choices?.[0]?.message?.content||'[]';
 }
@@ -677,10 +604,10 @@ async function plexSearch(query, types) {
 function bestMatch(query,results) {
   const q=query.toLowerCase().trim();
   return results.find(r=>r.title.toLowerCase()===q)
-    || results.find(r=>r.title.toLowerCase().startsWith(q))
-    || results.find(r=>r.title.toLowerCase().includes(q))
-    || results.find(r=>q.includes(r.title.toLowerCase())&&r.title.length>3)
-    || results[0]||null;
+    ||results.find(r=>r.title.toLowerCase().startsWith(q))
+    ||results.find(r=>r.title.toLowerCase().includes(q))
+    ||results.find(r=>q.includes(r.title.toLowerCase())&&r.title.length>3)
+    ||results[0]||null;
 }
 function renderCard(query,found,match,addAttr) {
   const attr=addAttr?` data-status="${found?'found':'missing'}"`:'' ;
@@ -694,10 +621,8 @@ function renderCard(query,found,match,addAttr) {
 // ── SINGLE ───────────────────────────────────────────────────
 async function doSingle() {
   const q=document.getElementById('s-query').value.trim(); if(!q) return;
-  if(!cfg.token){openConfig();return;}
   const btn=document.getElementById('s-btn'), out=document.getElementById('s-results');
   btn.innerHTML='<span class="spinner"></span> Searching…'; btn.disabled=true; out.innerHTML='';
-  activeServer=null;
   const results=await plexSearch(q,document.getElementById('s-type').value);
   const match=bestMatch(q,results);
   out.innerHTML=renderCard(q,!!match,match,false);
@@ -709,7 +634,6 @@ async function doBulk() {
   if(bulkRunning) return;
   const titles=document.getElementById('b-input').value.split('\n').map(l=>l.trim()).filter(Boolean);
   if(!titles.length){toast('⚠️ Enter at least one title');return;}
-  if(!cfg.token){openConfig();return;}
   const types=document.getElementById('b-type').value;
   const delay=parseInt(document.getElementById('b-delay').value);
   bulkRunning=true; bulkStop=false; bulkFound=[]; bulkMissing=[]; bulkAll=[];
@@ -718,7 +642,6 @@ async function doBulk() {
   const sum=document.getElementById('b-summary'), out=document.getElementById('b-results');
   btn.innerHTML='<span class="spinner"></span> Running…'; btn.disabled=true;
   progS.style.display=''; sum.style.display='none'; out.innerHTML='';
-  activeServer=null;
   for(let i=0;i<titles.length;i++) {
     if(bulkStop) break;
     const q=titles[i];
