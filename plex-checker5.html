@@ -115,7 +115,9 @@ select option { background:#1c1c24; }
 .toast.show { transform:translateX(-50%) translateY(0); }
 .divider { height:1px; background:var(--border); margin:14px 0; }
 .key-hint { font-size:11px; color:var(--muted); margin-top:5px; }
-.info-box { background:rgba(229,160,13,0.08); border:1px solid rgba(229,160,13,0.2); border-radius:9px; padding:11px 13px; font-size:12px; color:var(--accent); margin-bottom:14px; line-height:1.6; }
+.info-box { border-radius:9px; padding:11px 13px; font-size:12px; margin-bottom:14px; line-height:1.6; }
+.info-box.yellow { background:rgba(229,160,13,0.08); border:1px solid rgba(229,160,13,0.2); color:var(--accent); }
+.info-box.green  { background:var(--green-bg); border:1px solid var(--green-border); color:var(--green); }
 .spinner { width:15px; height:15px; border:2px solid rgba(0,0,0,.25); border-top-color:#000; border-radius:50%; display:inline-block; animation:spin .65s linear infinite; }
 .spinner-light { border-color:rgba(229,160,13,.2); border-top-color:var(--accent); }
 @keyframes spin { to{transform:rotate(360deg)} }
@@ -276,7 +278,6 @@ select option { background:#1c1c24; }
     </div>
     <button class="btn btn-accent" id="b-btn" onclick="doBulk()">Search All</button>
   </div>
-
   <div id="b-prog-section" style="display:none;" class="section">
     <div class="progress-wrap">
       <div class="progress-track"><div class="progress-bar" id="b-bar" style="width:0%"></div></div>
@@ -284,7 +285,6 @@ select option { background:#1c1c24; }
     </div>
     <button class="btn btn-ghost" style="margin-top:4px;font-size:13px;" onclick="stopBulk()">⏹ Stop</button>
   </div>
-
   <div id="b-summary" style="display:none;">
     <div class="stats-row">
       <div class="stat-box"><div class="stat-num green"  id="b-found-n">0</div><div class="stat-lbl">Found</div></div>
@@ -311,15 +311,18 @@ select option { background:#1c1c24; }
       <div class="modal-title">⚙️ Plex Config</div>
       <button class="close-btn" onclick="closeConfig()">✕</button>
     </div>
-
-    <div class="info-box">
-      💡 Use your <b>plex.direct</b> HTTPS URL — it works at home <b>and</b> outside on Tailscale. No switching needed.
+    <div class="info-box yellow">
+      💡 The app auto-detects if you're home or away and switches servers automatically. Just save both URLs below.
     </div>
-
     <div class="field">
-      <label>Plex Server URL</label>
-      <input type="text" id="cfg-server" placeholder="https://192-168-50-203….plex.direct:32400">
-      <div class="key-hint">Must be https:// — works anywhere with internet</div>
+      <label>Local Server URL (home WiFi)</label>
+      <input type="text" id="cfg-server-local" placeholder="https://192-168-50-203….plex.direct:32400">
+      <div class="key-hint">Used when on your home network</div>
+    </div>
+    <div class="field">
+      <label>Plex Remote URL (outside home)</label>
+      <input type="text" id="cfg-server-remote" placeholder="https://app.plex.tv/desktop (or your relay URL)">
+      <div class="key-hint">Get from Plex → Settings → Remote Access → "Show Advanced"</div>
     </div>
     <div class="field">
       <label>Plex Token</label>
@@ -336,54 +339,116 @@ select option { background:#1c1c24; }
 <div class="toast" id="toast"></div>
 
 <script>
+// ── CONFIG ──────────────────────────────────────────────────
 let cfg = {
-  server: 'https://192-168-50-203.79edeb32057a4ea5808c4d1b0dee3269.plex.direct:32400',
-  token:  'eixp7UGkmj8hcMhpdpU6'
+  serverLocal:  'https://192-168-50-203.79edeb32057a4ea5808c4d1b0dee3269.plex.direct:32400',
+  serverRemote: 'https://192-168-50-203.79edeb32057a4ea5808c4d1b0dee3269.plex.direct:32400',
+  token: 'eixp7UGkmj8hcMhpdpU6'
 };
+
+// The CORS proxy wraps HTTP Tailscale calls so GitHub Pages (HTTPS) can reach them
+// allOrigins is a free, open CORS proxy — it just forwards the request server-side
+const CORS_PROXY = 'https://api.allorigins.win/raw?url=';
+const TS_SERVER  = 'http://100.109.236.53:32400'; // Tailscale IP — used via proxy
+
+let activeServer = null; // resolved at runtime
+let usingProxy   = false;
+
 let currentProv = 'claude';
 let imgB64 = null, imgMime = null;
 let photoFound = [], photoMissing = [];
 let bulkFound = [], bulkMissing = [], bulkAll = [];
 let bulkRunning = false, bulkStop = false;
 
+// ── INIT ────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
   loadCfg(); loadKeys(); initDrop();
-  if (!cfg.server || !cfg.token) setTimeout(openConfig, 400);
+  if (!cfg.token) setTimeout(openConfig, 400);
 });
 
+// ── SERVER DETECTION ────────────────────────────────────────
+// Try local plex.direct first (works on LAN), then fall back to
+// CORS proxy → Tailscale IP (works outside)
+async function resolveServer() {
+  // Try local/direct URL first (fast on LAN, times out outside)
+  try {
+    const r = await fetch(`${cfg.serverLocal}/identity?X-Plex-Token=${cfg.token}`, {
+      signal: AbortSignal.timeout(3000)
+    });
+    if (r.ok) {
+      activeServer = cfg.serverLocal;
+      usingProxy = false;
+      return true;
+    }
+  } catch(e) {}
+
+  // Fall back: CORS proxy → Tailscale IP
+  try {
+    const proxyUrl = CORS_PROXY + encodeURIComponent(`${TS_SERVER}/identity?X-Plex-Token=${cfg.token}`);
+    const r = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
+    if (r.ok) {
+      activeServer = TS_SERVER;
+      usingProxy = true;
+      return true;
+    }
+  } catch(e) {}
+
+  return false;
+}
+
+async function plexFetch(path) {
+  if (!activeServer) {
+    const ok = await resolveServer();
+    if (!ok) throw new Error('Cannot reach Plex server — check connection');
+  }
+  const url = `${activeServer}${path}${path.includes('?')?'&':'?'}X-Plex-Token=${cfg.token}`;
+  if (usingProxy) {
+    return fetch(CORS_PROXY + encodeURIComponent(url), { signal: AbortSignal.timeout(10000) });
+  }
+  return fetch(url, { signal: AbortSignal.timeout(10000) });
+}
+
+// ── CONFIG ───────────────────────────────────────────────────
 function loadCfg() {
-  try { const s = localStorage.getItem('pxCfg5'); if (s) cfg = {...cfg,...JSON.parse(s)}; } catch(e){}
+  try { const s = localStorage.getItem('pxCfg6'); if (s) cfg = {...cfg,...JSON.parse(s)}; } catch(e){}
 }
 function saveConfig() {
-  cfg.server = document.getElementById('cfg-server').value.trim().replace(/\/+$/,'');
-  cfg.token  = document.getElementById('cfg-token').value.trim();
-  localStorage.setItem('pxCfg5', JSON.stringify(cfg));
+  cfg.serverLocal  = document.getElementById('cfg-server-local').value.trim().replace(/\/+$/,'');
+  cfg.serverRemote = document.getElementById('cfg-server-remote').value.trim().replace(/\/+$/,'');
+  cfg.token        = document.getElementById('cfg-token').value.trim();
+  localStorage.setItem('pxCfg6', JSON.stringify(cfg));
+  activeServer = null; // force re-detect on next request
   closeConfig(); toast('✅ Config saved!');
 }
 function openConfig() {
-  document.getElementById('cfg-server').value = cfg.server;
-  document.getElementById('cfg-token').value  = cfg.token;
-  document.getElementById('test-out').textContent = '';
+  document.getElementById('cfg-server-local').value  = cfg.serverLocal;
+  document.getElementById('cfg-server-remote').value = cfg.serverRemote;
+  document.getElementById('cfg-token').value         = cfg.token;
+  document.getElementById('test-out').textContent    = '';
   document.getElementById('cfg-overlay').classList.add('open');
 }
 function closeConfig() { document.getElementById('cfg-overlay').classList.remove('open'); }
+
 async function testConn() {
-  const srv = document.getElementById('cfg-server').value.trim().replace(/\/+$/,'');
-  const tok = document.getElementById('cfg-token').value.trim();
   const btn = document.getElementById('test-btn');
   const out = document.getElementById('test-out');
-  btn.innerHTML = '<span class="spinner spinner-light"></span> Testing…'; btn.disabled = true; out.textContent = '';
-  try {
-    const r = await fetch(`${srv}/library/sections?X-Plex-Token=${tok}`, { signal: AbortSignal.timeout(10000) });
-    out.style.color = r.ok ? 'var(--green)' : 'var(--red)';
-    out.textContent = r.ok ? '✅ Connected!' : `❌ Failed (HTTP ${r.status})`;
-  } catch(e) {
+  btn.innerHTML = '<span class="spinner spinner-light"></span> Testing…'; btn.disabled = true;
+  out.textContent = '⏳ Detecting best connection…'; out.style.color = 'var(--muted)';
+  activeServer = null;
+  const ok = await resolveServer();
+  if (ok) {
+    out.style.color = 'var(--green)';
+    out.textContent = usingProxy
+      ? '✅ Connected via Tailscale (outside network)'
+      : '✅ Connected via local network';
+  } else {
     out.style.color = 'var(--red)';
-    out.textContent = '❌ ' + (e.message || 'Could not reach server');
+    out.textContent = '❌ Could not reach Plex — check token & server is running';
   }
   btn.textContent = '🔌 Test Connection'; btn.disabled = false;
 }
 
+// ── API KEYS ─────────────────────────────────────────────────
 function loadKeys() {
   try {
     const k = JSON.parse(localStorage.getItem('aiKeys3')||'{}');
@@ -410,6 +475,7 @@ function checkReady() {
   document.getElementById('scan-btn').disabled = !(imgB64 && key);
 }
 
+// ── TABS / PROVIDER ──────────────────────────────────────────
 function gotoTab(id) {
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
@@ -425,6 +491,7 @@ function setProv(p) {
   checkReady();
 }
 
+// ── IMAGE ────────────────────────────────────────────────────
 function initDrop() {
   const dz = document.getElementById('dz');
   dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('over');});
@@ -458,7 +525,6 @@ function clearImg() {
   document.getElementById('scan-btn').disabled=true;
   resetScanUI(); setStep(0);
 }
-
 function setStep(active) {
   for(let i=1;i<=4;i++){
     const el=document.getElementById('step'+i);
@@ -468,13 +534,13 @@ function setStep(active) {
   }
 }
 
+// ── PHOTO SCAN ───────────────────────────────────────────────
 async function doPhotoScan() {
   if (!imgB64) return;
   const key = document.getElementById('key-'+currentProv).value.trim() || getKey(currentProv);
   if (!key) { toast('⚠️ Enter your '+currentProv+' API key'); return; }
-  if (!cfg.server || !cfg.token) { openConfig(); return; }
-  resetScanUI();
-  photoFound=[]; photoMissing=[];
+  if (!cfg.token) { openConfig(); return; }
+  resetScanUI(); photoFound=[]; photoMissing=[];
   const btn=document.getElementById('scan-btn');
   const prog=document.getElementById('scan-progress');
   const bar=document.getElementById('scan-bar');
@@ -483,27 +549,20 @@ async function doPhotoScan() {
   setStep(2); prog.style.display=''; bar.style.width='10%';
   lbl.textContent='🤖 AI is reading the image…';
   let titles=[], rawAI='';
-  try {
-    rawAI = await callAI(key);
-    titles = extractTitles(rawAI);
-  } catch(e) {
-    lbl.textContent='❌ AI error: '+e.message;
-    btn.textContent='🎬 Scan Photo → Check Plex'; btn.disabled=false;
-    return;
-  }
+  try { rawAI=await callAI(key); titles=extractTitles(rawAI); }
+  catch(e) { lbl.textContent='❌ AI error: '+e.message; btn.textContent='🎬 Scan Photo → Check Plex'; btn.disabled=false; return; }
   document.getElementById('ai-raw-box').textContent=rawAI;
   document.getElementById('ai-raw-section').style.display='';
   if (!titles.length) {
-    lbl.textContent='⚠️ AI found no movie/show titles in this image.';
-    bar.style.width='100%';
-    btn.textContent='🎬 Scan Photo → Check Plex'; btn.disabled=false;
-    setStep(1); return;
+    lbl.textContent='⚠️ AI found no titles in this image.';
+    bar.style.width='100%'; btn.textContent='🎬 Scan Photo → Check Plex'; btn.disabled=false; setStep(1); return;
   }
   document.getElementById('ph-total-n').textContent=titles.length;
   document.getElementById('scan-summary').style.display='';
   setStep(3); bar.style.width='20%';
-  const out=document.getElementById('scan-results');
-  out.innerHTML='';
+  lbl.textContent='🔍 Detecting network…';
+  activeServer=null;
+  const out=document.getElementById('scan-results'); out.innerHTML='';
   for (let i=0;i<titles.length;i++) {
     const q=titles[i];
     bar.style.width=(20+Math.round((i/titles.length)*75))+'%';
@@ -513,16 +572,13 @@ async function doPhotoScan() {
     tmp.innerHTML=`<div class="result-card scanning" id="${placeholderId}">
       <div class="result-icon">⏳</div>
       <div class="result-body"><div class="result-title">${esc(q)}</div><div class="result-meta">Checking Plex…</div></div>
-      <span class="badge badge-yellow">Scanning</span>
-    </div>`;
+      <span class="badge badge-yellow">Scanning</span></div>`;
     out.appendChild(tmp.firstChild);
     const results=await plexSearch(q,'1,2');
-    const match=bestMatch(q,results);
-    const found=!!match;
-    const placeholder=document.getElementById(placeholderId);
-    if(placeholder) placeholder.outerHTML=renderCard(q,found,match,true,'ph');
-    if(found) photoFound.push({query:q,match});
-    else photoMissing.push({query:q});
+    const match=bestMatch(q,results); const found=!!match;
+    const ph=document.getElementById(placeholderId);
+    if(ph) ph.outerHTML=renderCard(q,found,match,true);
+    if(found) photoFound.push({query:q,match}); else photoMissing.push({query:q});
     document.getElementById('ph-found-n').textContent=photoFound.length;
     document.getElementById('ph-miss-n').textContent=photoMissing.length;
     if(i<titles.length-1) await sleep(500);
@@ -534,32 +590,21 @@ async function doPhotoScan() {
 }
 
 function resetScanUI() {
-  document.getElementById('scan-progress').style.display='none';
-  document.getElementById('ai-raw-section').style.display='none';
-  document.getElementById('scan-summary').style.display='none';
+  ['scan-progress','ai-raw-section','scan-summary'].forEach(id=>document.getElementById(id).style.display='none');
   document.getElementById('scan-results').innerHTML='';
   document.getElementById('scan-bar').style.width='0%';
-  document.getElementById('ph-found-n').textContent='0';
-  document.getElementById('ph-miss-n').textContent='0';
-  document.getElementById('ph-total-n').textContent='0';
-  ['pfp-all','pfp-found','pfp-missing'].forEach(id=>{
-    document.getElementById(id).classList.toggle('active',id==='pfp-all');
-  });
+  ['ph-found-n','ph-miss-n','ph-total-n'].forEach(id=>document.getElementById(id).textContent='0');
+  ['pfp-all','pfp-found','pfp-missing'].forEach(id=>document.getElementById(id).classList.toggle('active',id==='pfp-all'));
 }
 function toggleAiRaw() {
-  const box=document.getElementById('ai-raw-box');
-  const tog=document.getElementById('ai-raw-toggle');
-  const open=box.style.display==='none';
-  box.style.display=open?'':'none';
+  const box=document.getElementById('ai-raw-box'), tog=document.getElementById('ai-raw-toggle');
+  const open=box.style.display==='none'; box.style.display=open?'':'none';
   tog.textContent=(open?'▼':'▶')+' AI Identified Titles';
 }
 function filterPhoto(type) {
-  ['pfp-all','pfp-found','pfp-missing'].forEach(id=>{
-    document.getElementById(id).classList.toggle('active',id==='pfp-'+type);
-  });
+  ['pfp-all','pfp-found','pfp-missing'].forEach(id=>document.getElementById(id).classList.toggle('active',id==='pfp-'+type));
   document.querySelectorAll('#scan-results .result-card').forEach(el=>{
-    const s=el.getAttribute('data-status');
-    el.style.display=(type==='all'||s===type)?'':'none';
+    el.style.display=(type==='all'||el.getAttribute('data-status')===type)?'':'none';
   });
 }
 function copyPhotoList(type) {
@@ -567,14 +612,10 @@ function copyPhotoList(type) {
   navigator.clipboard.writeText(arr.map(i=>i.query).join('\n')).then(()=>toast(`📋 ${arr.length} ${type} titles copied!`));
 }
 
-const AI_PROMPT=`You are a media identification expert. Look at this image carefully and identify ALL movies and TV shows visible — this includes:
-- Movie/show titles on covers, posters, spines, or thumbnails
-- Any text showing a movie or show name
-- Actors you can identify along with the movies/shows they are known for
-
+// ── AI ───────────────────────────────────────────────────────
+const AI_PROMPT=`You are a media identification expert. Look at this image carefully and identify ALL movies and TV shows visible.
 Return ONLY a JSON array of strings, each being a movie or TV show title. No explanation, no markdown, just the raw JSON array.
 Example: ["Inception", "The Dark Knight", "Breaking Bad"]
-
 If you see no recognizable movies or shows, return an empty array: []`;
 
 async function callAI(key) {
@@ -583,63 +624,47 @@ async function callAI(key) {
   return callOpenAI(key);
 }
 async function callClaude(key) {
-  const body={model:'claude-opus-4-5',max_tokens:1024,messages:[{role:'user',content:[
-    {type:'image',source:{type:'base64',media_type:imgMime,data:imgB64}},
-    {type:'text',text:AI_PROMPT}
-  ]}]};
   const r=await fetch('https://api.anthropic.com/v1/messages',{
     method:'POST',
     headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-    body:JSON.stringify(body)
+    body:JSON.stringify({model:'claude-opus-4-5',max_tokens:1024,messages:[{role:'user',content:[
+      {type:'image',source:{type:'base64',media_type:imgMime,data:imgB64}},{type:'text',text:AI_PROMPT}
+    ]}]})
   });
-  const d=await r.json();
-  if(!r.ok) throw new Error(d.error?.message||`HTTP ${r.status}`);
+  const d=await r.json(); if(!r.ok) throw new Error(d.error?.message||`HTTP ${r.status}`);
   return d.content?.[0]?.text||'[]';
 }
 async function callGemini(key) {
-  const body={contents:[{parts:[
-    {inline_data:{mime_type:imgMime,data:imgB64}},
-    {text:AI_PROMPT}
-  ]}]};
   const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`,{
-    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({contents:[{parts:[{inline_data:{mime_type:imgMime,data:imgB64}},{text:AI_PROMPT}]}]})
   });
-  const d=await r.json();
-  if(!r.ok) throw new Error(d.error?.message||`HTTP ${r.status}`);
+  const d=await r.json(); if(!r.ok) throw new Error(d.error?.message||`HTTP ${r.status}`);
   return d.candidates?.[0]?.content?.parts?.[0]?.text||'[]';
 }
 async function callOpenAI(key) {
-  const body={model:'gpt-4o',max_tokens:1024,messages:[{role:'user',content:[
-    {type:'image_url',image_url:{url:`data:${imgMime};base64,${imgB64}`}},
-    {type:'text',text:AI_PROMPT}
-  ]}]};
   const r=await fetch('https://api.openai.com/v1/chat/completions',{
-    method:'POST',
-    headers:{'Content-Type':'application/json','Authorization':'Bearer '+key},
-    body:JSON.stringify(body)
+    method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+key},
+    body:JSON.stringify({model:'gpt-4o',max_tokens:1024,messages:[{role:'user',content:[
+      {type:'image_url',image_url:{url:`data:${imgMime};base64,${imgB64}`}},{type:'text',text:AI_PROMPT}
+    ]}]})
   });
-  const d=await r.json();
-  if(!r.ok) throw new Error(d.error?.message||`HTTP ${r.status}`);
+  const d=await r.json(); if(!r.ok) throw new Error(d.error?.message||`HTTP ${r.status}`);
   return d.choices?.[0]?.message?.content||'[]';
 }
 function extractTitles(raw) {
-  try {
-    const clean=raw.replace(/```json|```/g,'').trim();
-    const arr=JSON.parse(clean);
-    if(Array.isArray(arr)) return arr.map(s=>String(s).trim()).filter(Boolean);
-  } catch(e){}
-  const matches=raw.match(/"([^"]+)"/g);
-  if(matches) return matches.map(s=>s.replace(/"/g,'').trim()).filter(Boolean);
+  try { const arr=JSON.parse(raw.replace(/```json|```/g,'').trim()); if(Array.isArray(arr)) return arr.map(s=>String(s).trim()).filter(Boolean); } catch(e){}
+  const m=raw.match(/"([^"]+)"/g); if(m) return m.map(s=>s.replace(/"/g,'').trim()).filter(Boolean);
   return raw.split('\n').map(s=>s.replace(/^[-•*\d.]+\s*/,'').trim()).filter(s=>s.length>1&&s.length<80);
 }
 
+// ── PLEX SEARCH ──────────────────────────────────────────────
 async function plexSearch(query, types) {
   const typeArr=types.split(',').map(Number);
   let results=[];
   for(const t of typeArr) {
-    const url=`${cfg.server}/search?query=${encodeURIComponent(query)}&type=${t}&X-Plex-Token=${cfg.token}`;
     try {
-      const r=await fetch(url,{signal:AbortSignal.timeout(10000)});
+      const r=await plexFetch(`/search?query=${encodeURIComponent(query)}&type=${t}`);
       if(!r.ok) continue;
       const xml=new DOMParser().parseFromString(await r.text(),'application/xml');
       xml.querySelectorAll('Video, Directory').forEach(el=>{
@@ -651,89 +676,75 @@ async function plexSearch(query, types) {
 }
 function bestMatch(query,results) {
   const q=query.toLowerCase().trim();
-  let m=results.find(r=>r.title.toLowerCase()===q); if(m) return m;
-  m=results.find(r=>r.title.toLowerCase().startsWith(q)); if(m) return m;
-  m=results.find(r=>r.title.toLowerCase().includes(q)); if(m) return m;
-  m=results.find(r=>q.includes(r.title.toLowerCase())&&r.title.length>3); if(m) return m;
-  return results[0]||null;
+  return results.find(r=>r.title.toLowerCase()===q)
+    || results.find(r=>r.title.toLowerCase().startsWith(q))
+    || results.find(r=>r.title.toLowerCase().includes(q))
+    || results.find(r=>q.includes(r.title.toLowerCase())&&r.title.length>3)
+    || results[0]||null;
 }
-function renderCard(query,found,match,addAttr,prefix) {
+function renderCard(query,found,match,addAttr) {
   const attr=addAttr?` data-status="${found?'found':'missing'}"`:'' ;
   if(found) {
-    const tl=match.type==='show'?'📺 TV Show':'🎬 Movie';
-    const meta=[tl,match.year].filter(Boolean).join(' · ');
-    return `<div class="result-card found"${attr}>
-      <div class="result-icon">✅</div>
-      <div class="result-body"><div class="result-title">${esc(match.title)}</div><div class="result-meta">${esc(meta)}</div></div>
-      <span class="badge badge-green">In Plex</span>
-    </div>`;
+    const meta=[(match.type==='show'?'📺 TV Show':'🎬 Movie'),match.year].filter(Boolean).join(' · ');
+    return `<div class="result-card found"${attr}><div class="result-icon">✅</div><div class="result-body"><div class="result-title">${esc(match.title)}</div><div class="result-meta">${esc(meta)}</div></div><span class="badge badge-green">In Plex</span></div>`;
   }
-  return `<div class="result-card missing"${attr}>
-    <div class="result-icon">❌</div>
-    <div class="result-body"><div class="result-title">${esc(query)}</div><div class="result-meta">Not in Plex library</div></div>
-    <span class="badge badge-red">Missing</span>
-  </div>`;
+  return `<div class="result-card missing"${attr}><div class="result-icon">❌</div><div class="result-body"><div class="result-title">${esc(query)}</div><div class="result-meta">Not in Plex library</div></div><span class="badge badge-red">Missing</span></div>`;
 }
 
+// ── SINGLE ───────────────────────────────────────────────────
 async function doSingle() {
-  const q=document.getElementById('s-query').value.trim();
-  if(!q) return;
-  if(!cfg.server||!cfg.token){openConfig();return;}
-  const types=document.getElementById('s-type').value;
-  const btn=document.getElementById('s-btn');
-  const out=document.getElementById('s-results');
+  const q=document.getElementById('s-query').value.trim(); if(!q) return;
+  if(!cfg.token){openConfig();return;}
+  const btn=document.getElementById('s-btn'), out=document.getElementById('s-results');
   btn.innerHTML='<span class="spinner"></span> Searching…'; btn.disabled=true; out.innerHTML='';
-  const results=await plexSearch(q,types);
+  activeServer=null;
+  const results=await plexSearch(q,document.getElementById('s-type').value);
   const match=bestMatch(q,results);
-  out.innerHTML=renderCard(q,!!match,match,false,'s');
+  out.innerHTML=renderCard(q,!!match,match,false);
   btn.textContent='Search Plex'; btn.disabled=false;
 }
 
+// ── BULK ─────────────────────────────────────────────────────
 async function doBulk() {
   if(bulkRunning) return;
   const titles=document.getElementById('b-input').value.split('\n').map(l=>l.trim()).filter(Boolean);
   if(!titles.length){toast('⚠️ Enter at least one title');return;}
-  if(!cfg.server||!cfg.token){openConfig();return;}
+  if(!cfg.token){openConfig();return;}
   const types=document.getElementById('b-type').value;
   const delay=parseInt(document.getElementById('b-delay').value);
   bulkRunning=true; bulkStop=false; bulkFound=[]; bulkMissing=[]; bulkAll=[];
-  const btn=document.getElementById('b-btn');
-  const progS=document.getElementById('b-prog-section');
-  const bar=document.getElementById('b-bar');
-  const lbl=document.getElementById('b-prog-lbl');
-  const sum=document.getElementById('b-summary');
-  const out=document.getElementById('b-results');
+  const btn=document.getElementById('b-btn'), progS=document.getElementById('b-prog-section');
+  const bar=document.getElementById('b-bar'), lbl=document.getElementById('b-prog-lbl');
+  const sum=document.getElementById('b-summary'), out=document.getElementById('b-results');
   btn.innerHTML='<span class="spinner"></span> Running…'; btn.disabled=true;
   progS.style.display=''; sum.style.display='none'; out.innerHTML='';
+  activeServer=null;
   for(let i=0;i<titles.length;i++) {
     if(bulkStop) break;
     const q=titles[i];
     bar.style.width=Math.round((i/titles.length)*100)+'%';
     lbl.textContent=`${i+1}/${titles.length} — ${q}`;
     const results=await plexSearch(q,types);
-    const match=bestMatch(q,results);
-    const found=!!match;
+    const match=bestMatch(q,results); const found=!!match;
     const item={query:q,found,match};
-    bulkAll.push(item);
-    if(found) bulkFound.push(item); else bulkMissing.push(item);
+    bulkAll.push(item); if(found) bulkFound.push(item); else bulkMissing.push(item);
     document.getElementById('b-found-n').textContent=bulkFound.length;
     document.getElementById('b-miss-n').textContent=bulkMissing.length;
     document.getElementById('b-total-n').textContent=bulkAll.length;
     sum.style.display='';
     const tmp=document.createElement('div');
-    tmp.innerHTML=renderCard(q,found,match,true,'b');
+    tmp.innerHTML=renderCard(q,found,match,true);
     tmp.firstChild.setAttribute('data-status',found?'found':'missing');
     out.prepend(tmp.firstChild);
     if(i<titles.length-1) await sleep(delay);
   }
-  bar.style.width='100%';
-  lbl.textContent=bulkStop?'Stopped.':'✅ Done!';
+  bar.style.width='100%'; lbl.textContent=bulkStop?'Stopped.':'✅ Done!';
   setTimeout(()=>{progS.style.display='none';},1800);
   btn.textContent='Search All'; btn.disabled=false; bulkRunning=false;
 }
 function stopBulk(){bulkStop=true;}
 function filterBulk(type){
-  ['all','found','missing'].forEach(t=>{document.getElementById('fp-'+t).classList.toggle('active',t===type);});
+  ['all','found','missing'].forEach(t=>document.getElementById('fp-'+t).classList.toggle('active',t===type));
   document.querySelectorAll('#b-results .result-card').forEach(el=>{
     el.style.display=(type==='all'||el.getAttribute('data-status')===type)?'':'none';
   });
@@ -742,12 +753,14 @@ function copyList(type){
   const arr=type==='missing'?bulkMissing:bulkFound;
   navigator.clipboard.writeText(arr.map(i=>i.query).join('\n')).then(()=>toast(`📋 ${arr.length} ${type} titles copied!`));
 }
+
+// ── UTILS ────────────────────────────────────────────────────
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
 let toastTimer;
 function toast(msg){
-  const el=document.getElementById('toast');el.textContent=msg;el.classList.add('show');
-  clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('show'),2600);
+  const el=document.getElementById('toast'); el.textContent=msg; el.classList.add('show');
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>el.classList.remove('show'),2600);
 }
 </script>
 </body>
